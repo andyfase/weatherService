@@ -61,3 +61,12 @@ Some notes on this:
 - Make sure your security group allows the ELB to talk to the ECS cluster on port 8080 :-)
 - Make sure you pass in those environment variables!!
 
+# Usage
+Calling the weatherService. Use curl or your tool of choice:
+
+```
+curl -d'{"lat":"49.2561055", "lon":"-123.1939531"}' http://weather.aws.andyfase.com/forecast/hour
+```
+
+Change the domain to your domain of choice, the one above does exist so you can use it as a reference too!
+
