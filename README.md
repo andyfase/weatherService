@@ -12,8 +12,8 @@ An example micro-service to fetch a summary of the weather given a lat/long inpu
 # Setup 
 
 1. Clone repo `git clone https://github.com/andyfase/weatherService.git`
-1. Run `export GOPATH=/whereever/you/put/it
-1. Install Dependencies `go get ....` listed below.
+1. Run `export GOPATH=/whereever/you/put/it`
+1. Install Dependencies `go get ....` listed below (Go Libaries section).
 1. Run `GOOS=linux GOARCH=amd64 go build -o ./bin/linux/weatherService weatherService` to build a linux binary
 1. Setup your [docker-machine (needed for Windows and OSX)](https://docs.docker.com/machine/get-started/)
 1. Run `docker build -t weather-service --file ./weatherService.scratch  .`
@@ -56,10 +56,19 @@ Two environment variables are needed
 
 Some notes on this:
 
-- Make sure your security group allows connectivity between the servers for the ECS deamons to communicate
+- Make sure your EC2 instances have the right ECS roles assigned `arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role` without it your instances will not be able to form a ECS cluster. 
 - Setup a ELB for the ECS service to load balance requests. The weatherService exposes port 8080 on the ECS cluster node. Hence the ELB needs to connect to port 8080 on the backend
 - Make sure your security group allows the ELB to talk to the ECS cluster on port 8080 :-)
 - Make sure you pass in those environment variables!!
+
+# Run the service
+
+Once you have an ECS cluster you can define a [new service](http://docs.aws.amazon.com/AmazonECS/latest/developerguide/create-service.html) specifing the docker container you pushed into your one repo. Prior to doing that you will need
+
+- To create an ELB, which ECS will use to connect the docker instances too. Make sure you expose port 8080 to your ECS cluster!
+- A Redis ElasticCache cluster. Make sure you expose port 6379, so that your containers can connect to it.
+
+Within the service definition be sure to include the environment variables to pass into the service. These will be picked up and used by the weatherService.
 
 # Usage
 Calling the weatherService. Use curl or your tool of choice:
