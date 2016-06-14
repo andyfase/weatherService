@@ -47,8 +47,8 @@ The service can be run locally through `docker run` but will exit out becuase it
 
 Two environment variables are needed
 
-**REDIS_SERVER** The redis service to connect to in the format "host:port" (this is expected to be used with a [ElasticCache Redis server](http://docs.aws.amazon.com/AmazonElastiCache/latest/UserGuide/Clusters.Create.Redis.CON.html))
-**APIKEY** The weather service uses [Dark Skies](https://developer.forecast.io/) API to retrieve weather data. Signup (its free) and get your API ID to use.
+- **REDIS_SERVER** The redis service to connect to in the format "host:port" (this is expected to be used with a [ElasticCache Redis server](http://docs.aws.amazon.com/AmazonElastiCache/latest/UserGuide/Clusters.Create.Redis.CON.html))
+- **APIKEY** The weather service uses [Dark Skies](https://developer.forecast.io/) API to retrieve weather data. Signup (its free) and get your API ID to use.
 
 # Go Build your ECS Cluster
 
