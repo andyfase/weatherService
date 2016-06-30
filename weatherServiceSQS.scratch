@@ -1,0 +1,5 @@
+FROM scratch
+ADD ./bin/linux/weatherServiceSQS /weatherService
+ADD certs/ca-certificates.crt /etc/ssl/certs/
+EXPOSE 8080
+CMD ["/weatherService"]

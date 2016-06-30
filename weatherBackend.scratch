@@ -1,0 +1,4 @@
+FROM scratch
+ADD bin/linux/weatherBackend /weatherBackend
+ADD certs/ca-certificates.crt /etc/ssl/certs/
+CMD ["/weatherBackend"]
