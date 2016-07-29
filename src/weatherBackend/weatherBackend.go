@@ -8,11 +8,14 @@ import (
   "github.com/aws/aws-sdk-go/service/sqs"
   "fmt"
   "net/http"
+  "time"
+  "strconv"
 )
 
 
-var inputQueue  string ="https://sqs.us-west-2.amazonaws.com/433468561249/weather-requests"
-var outputQueue string ="https://sqs.us-west-2.amazonaws.com/433468561249/weather-responses"
+var inputQueue  string
+var outputQueue string
+var processWait int
 
 type weatherRequest struct {
   Lat string `json:"lat"`
@@ -21,6 +24,8 @@ type weatherRequest struct {
 }
 
 type weatherResponse struct {
+  Lat string `json:"lat"`
+  Lon string `json:"lon"`
   RequestID string `json:"requestID"`
   Forecasts map[string]string `json:"forecasts"`
 }
@@ -62,20 +67,27 @@ func getWeather(lat string, lon string, summaries []string) (map[string]string, 
 func processMessage (message *sqs.Message, responseChannel chan QueueResponse) {
 
   var r weatherRequest
+  fmt.Println(*message.Body)
   if err := json.Unmarshal([]byte(*message.Body), &r); err != nil {
     fmt.Println(err)
     return
   }
+
   forecast, err := getWeather(r.Lat, r.Lon, r.ForecastType)
   if err != nil {
     fmt.Println(err)
     return
   }
 
+  // sleep configurable time
+  time.Sleep(time.Duration(processWait) * time.Millisecond)
+
   var response QueueResponse
   response.message.Forecasts = forecast
   response.message.RequestID = *message.MessageId
   response.ReceiptHandle = *message.ReceiptHandle
+  response.message.Lat = r.Lat
+  response.message.Lon = r.Lon
 
   responseChannel <- response
 }
@@ -83,7 +95,7 @@ func processMessage (message *sqs.Message, responseChannel chan QueueResponse) {
 func processMessageResponses(queue chan QueueResponse) {
 
   // setup SQS object
-  svc := sqs.New(session.New(), &aws.Config{Region: aws.String("us-west-2")})
+  svc := sqs.New(session.New(), &aws.Config{Region: aws.String(os.Getenv("REGION"))})
 
   // loop over channel waiting to deal with weather Responses
   for elem := range queue {
@@ -120,7 +132,18 @@ func processMessageResponses(queue chan QueueResponse) {
 }
 
 func main() {
-  svc := sqs.New(session.New(), &aws.Config{Region: aws.String("us-west-2")})
+
+  inputQueue  = os.Getenv("REQUEST_QUEUE")
+  outputQueue = os.Getenv("RESPONSE_QUEUE")
+
+  waitTime, err := strconv.ParseInt(os.Getenv("WAIT_TIME"), 10, 32)
+  if err != nil {
+    processWait = 0
+  } else {
+    processWait = int(waitTime)
+  }
+
+  svc := sqs.New(session.New(), &aws.Config{Region: aws.String(os.Getenv("REGION"))})
 
   params := &sqs.ReceiveMessageInput{
       QueueUrl: aws.String(inputQueue),

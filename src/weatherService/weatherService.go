@@ -15,15 +15,17 @@ import (
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"time"
 	"fmt"
+	"strconv"
 )
 
-var requestQueue  string ="https://sqs.us-west-2.amazonaws.com/433468561249/weather-requests"
-var responseQueue  string ="https://sqs.us-west-2.amazonaws.com/433468561249/weather-responses"
+var requestQueue  string
+var responseQueue string
+var waitTimeMultiplier int
 
 
 type WeatherService interface {
 	SubmitForecastRequest(*redis.Client, *sqs.SQS, hourlyForecastRequest) (hourlyForecastResponse, error)
-	CheckForecastResponse(*redis.Client, hourlyForecastRequest) (hourlyForecastResponse, error)
+	CheckForecastResponse(*redis.Client, hourlyForecastRequest) (hourlyForecastResponse)
 }
 
 type weatherService struct{}
@@ -54,18 +56,26 @@ func (weatherService) SubmitForecastRequest(redisClient *redis.Client, sqsClient
 	return r, nil
 }
 
-func (weatherService) CheckForecastResponse(redisClient *redis.Client, req hourlyForecastRequest) (hourlyForecastResponse, error) {
+func (weatherService) CheckForecastResponse(redisClient *redis.Client, req hourlyForecastRequest) (hourlyForecastResponse) {
 
 	var r hourlyForecastResponse
-	forecast, redisErr := redisClient.Get("weatherService:Cache:" + req.RequestID + ":response").Result()
-	if redisErr != nil {
+	var forecast string
+	var err error
+	if len(req.Lat) > 0 && len(req.Lon) > 0 {
+		forecast, err = redisClient.Get("weatherService:Cache:" + req.Lat + ":" + req.Lon + ":response").Result()
+	} else {
+		forecast, err = redisClient.Get("weatherService:Cache:" + req.RequestID + ":response").Result()
+	}
+	if err != nil {
 		r.Status = 1
-		r.RequestID = req.RequestID
+		if len(req.RequestID) > 0 {
+			r.RequestID = req.RequestID
+		}
 	} else {
 		r.Summary = forecast
 		r.Status = 0
 	}
-	return r, nil
+	return r
 }
 
 // ErrEmpty is returned when input string is empty
@@ -86,6 +96,8 @@ type hourlyForecastResponse struct {
 }
 
 type weatherResponse struct {
+	Lat string `json:"lat"`
+	Lon string `json:"lon"`
   RequestID string `json:"requestID"`
   Forecasts map[string]string `json:"forecasts"`
 }
@@ -93,14 +105,28 @@ type weatherResponse struct {
 func makeHourlyForecastEndpoint(svc WeatherService, redisClient *redis.Client, sqsClient *sqs.SQS) endpoint.Endpoint {
 	return func(ctx context.Context, request interface{}) (interface{}, error) {
 		req := request.(hourlyForecastRequest)
-		var v hourlyForecastResponse
 		var err error
-		if len(req.RequestID) > 0 {
-			v, err = svc.CheckForecastResponse(redisClient, req)
-		} else {
-			v, err = svc.SubmitForecastRequest(redisClient, sqsClient, req)
+
+		// always check for a cached forecast request
+		v := svc.CheckForecastResponse(redisClient, req)
+		if v.Status == 0 {
+			return v, nil
 		}
-		return v, err
+
+		// no cache so submit request onto queue
+		v, err = svc.SubmitForecastRequest(redisClient, sqsClient, req)
+		if err != nil {
+			return v, err
+		}
+
+		// rather than just respond, wait then check if the request has already been processed
+		// if it has we can return the actual forecast, otherwise we just return the requestID already obtained
+		time.Sleep(time.Duration(waitTimeMultiplier) * time.Millisecond)
+		v2 := svc.CheckForecastResponse(redisClient, req)
+		if v2.Status == 0 {
+			return v2, nil
+		}
+		return v, nil
 	}
 }
 
@@ -112,9 +138,11 @@ func processResponse (redisClient *redis.Client, sqsClient *sqs.SQS, message *sq
   }
 
 	for _, forecast := range r.Forecasts {
-		err := redisClient.Set("weatherService:Cache:" + r.RequestID + ":response", forecast, time.Duration(30)*time.Minute).Err()
-		if err != nil {
-			return
+		err1 := redisClient.Set("weatherService:Cache:" + r.RequestID + ":response", forecast, time.Duration(30)*time.Minute).Err()
+		err2 := redisClient.Set("weatherService:Cache:" + r.Lat + ":" + r.Lon + ":response", forecast, time.Duration(30)*time.Minute).Err()
+
+		if err1 != nil || err2 != nil {
+			return // give up something failed.
 		}
 	}
 	// signal back we have now dealt with the request to the request queue
@@ -152,6 +180,17 @@ func processQueueResponses(redisClient *redis.Client, sqsClient *sqs.SQS) {
 
 
 func main() {
+
+	requestQueue = os.Getenv("REQUEST_QUEUE")
+	responseQueue = os.Getenv("RESPONSE_QUEUE")
+
+	waitTime, err := strconv.ParseInt(os.Getenv("WAIT_TIME"), 10, 32)
+	if err != nil {
+		waitTimeMultiplier = 100
+	} else {
+		waitTimeMultiplier = int(waitTime)
+	}
+
 	ctx := context.Background()
 	svc := weatherService{}
 
@@ -162,10 +201,10 @@ func main() {
 		DB:       0,  // use default DB
 	})
 
-	sqsClient := sqs.New(session.New(), &aws.Config{Region: aws.String("us-west-2")})
+	sqsClient := sqs.New(session.New(), &aws.Config{Region: aws.String(os.Getenv("REGION"))})
 
 	// make sure we can communicate to redis
-	_, err := redisClient.Ping().Result()
+	_, err = redisClient.Ping().Result()
 	if err != nil {
 		log.Fatal(err)
 	}
