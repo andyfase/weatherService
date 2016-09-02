@@ -16,6 +16,7 @@ import (
 	"time"
 	"fmt"
 	"strconv"
+	"io"
 )
 
 var requestQueue  string
@@ -24,15 +25,15 @@ var waitTimeMultiplier int
 
 
 type WeatherService interface {
-	SubmitForecastRequest(*redis.Client, *sqs.SQS, hourlyForecastRequest) (hourlyForecastResponse, error)
-	CheckForecastResponse(*redis.Client, hourlyForecastRequest) (hourlyForecastResponse)
+	SubmitForecastRequest(*redis.Client, *sqs.SQS, forecastRequest) (forecastResponse, error)
+	CheckForecastResponse(*redis.Client, forecastRequest) (forecastResponse)
 }
 
 type weatherService struct{}
 
-func (weatherService) SubmitForecastRequest(redisClient *redis.Client, sqsClient *sqs.SQS, req hourlyForecastRequest) (hourlyForecastResponse, error) {
+func (weatherService) SubmitForecastRequest(redisClient *redis.Client, sqsClient *sqs.SQS, req forecastRequest) (forecastResponse, error) {
 
-	var r hourlyForecastResponse
+	var r forecastResponse
 
 	b, err := json.Marshal(req)
 	if err != nil {
@@ -53,19 +54,24 @@ func (weatherService) SubmitForecastRequest(redisClient *redis.Client, sqsClient
 	}
 	r.RequestID = *rMess.MessageId
 	r.Status = 1
+
+	// add hostname to every response so we can see load-balencing in play!
+	r.Server, _ = os.Hostname()
+
 	return r, nil
 }
 
-func (weatherService) CheckForecastResponse(redisClient *redis.Client, req hourlyForecastRequest) (hourlyForecastResponse) {
+func (weatherService) CheckForecastResponse(redisClient *redis.Client, req forecastRequest) (forecastResponse) {
 
-	var r hourlyForecastResponse
+	var r forecastResponse
 	var forecast string
 	var err error
 	if len(req.Lat) > 0 && len(req.Lon) > 0 {
-		forecast, err = redisClient.Get("weatherService:Cache:" + req.Lat + ":" + req.Lon + ":response").Result()
+		forecast, err = redisClient.Get("weatherService:Cache:" + req.Lat + ":" + req.Lon + ":" + req.ForecastType + ":response").Result()
 	} else {
 		forecast, err = redisClient.Get("weatherService:Cache:" + req.RequestID + ":response").Result()
 	}
+	
 	if err != nil {
 		r.Status = 1
 		if len(req.RequestID) > 0 {
@@ -75,38 +81,45 @@ func (weatherService) CheckForecastResponse(redisClient *redis.Client, req hourl
 		r.Summary = forecast
 		r.Status = 0
 	}
+
+	// add hostname to every response so we can see load-balencing in play!
+	r.Server, _ = os.Hostname()
+
 	return r
 }
 
 // ErrEmpty is returned when input string is empty
 var ErrEmpty = errors.New("Require GPS lat/long as input parameters")
 
-type hourlyForecastRequest struct {
+type forecastRequest struct {
 	Lat string `json:"lat"`
 	Lon string `json:"lon"`
-	ForecastType []string `json:"summaries"`
+	ForecastType string `json:"forecastType,omitempty"`
 	RequestID string `json:"requestID"`
 }
 
-type hourlyForecastResponse struct {
+type forecastResponse struct {
 	Summary string `json:"summary,omitempty"`
 	Err     string `json:"err,omitempty"` // errors don't define JSON marshaling
 	Status  int `json: status`
 	RequestID string `json:"requestID,omitempty"`
+	Server  string `json:"server,omitempty"`
 }
 
 type weatherResponse struct {
 	Lat string `json:"lat"`
 	Lon string `json:"lon"`
   RequestID string `json:"requestID"`
-  Forecasts map[string]string `json:"forecasts"`
+  Forecast string `json:"forecast"`
+	ForecastType string `json:"forecastType"`
 }
 
-func makeHourlyForecastEndpoint(svc WeatherService, redisClient *redis.Client, sqsClient *sqs.SQS) endpoint.Endpoint {
+func makeForecastEndpoint(svc WeatherService, redisClient *redis.Client, sqsClient *sqs.SQS, forecastType string) endpoint.Endpoint {
 	return func(ctx context.Context, request interface{}) (interface{}, error) {
-		req := request.(hourlyForecastRequest)
+		req := request.(forecastRequest)
 		var err error
 
+		req.ForecastType = forecastType
 		// always check for a cached forecast request
 		v := svc.CheckForecastResponse(redisClient, req)
 		if v.Status == 0 {
@@ -137,14 +150,13 @@ func processResponse (redisClient *redis.Client, sqsClient *sqs.SQS, message *sq
     return
   }
 
-	for _, forecast := range r.Forecasts {
-		err1 := redisClient.Set("weatherService:Cache:" + r.RequestID + ":response", forecast, time.Duration(30)*time.Minute).Err()
-		err2 := redisClient.Set("weatherService:Cache:" + r.Lat + ":" + r.Lon + ":response", forecast, time.Duration(30)*time.Minute).Err()
+	err1 := redisClient.Set("weatherService:Cache:" + r.RequestID + ":response", r.Forecast, time.Duration(30)*time.Minute).Err()
+	err2 := redisClient.Set("weatherService:Cache:" + r.Lat + ":" + r.Lon + ":" + r.ForecastType + ":response", r.Forecast, time.Duration(30)*time.Minute).Err()
 
-		if err1 != nil || err2 != nil {
-			return // give up something failed.
-		}
+	if err1 != nil || err2 != nil {
+		return // give up something failed.
 	}
+
 	// signal back we have now dealt with the request to the request queue
 	paramsDelete := &sqs.DeleteMessageInput{
 			QueueUrl:      aws.String(responseQueue),
@@ -212,19 +224,25 @@ func main() {
 	// setup mesage queue response handler
 	go processQueueResponses(redisClient,sqsClient)
 
-	hourlyForecastHandler := httptransport.NewServer(
+	forecastHandler := httptransport.NewServer(
 		ctx,
-		makeHourlyForecastEndpoint(svc, redisClient, sqsClient),
-		decodeHourlyForecastRequest,
+		makeForecastEndpoint(svc, redisClient, sqsClient, os.Getenv("FORECAST_TYPE")),
+		decodeForecastRequest,
 		encodeResponse,
 	)
 
-	http.Handle("/forecast/hour", hourlyForecastHandler)
+	http.Handle("/forecast/" + os.Getenv("FORECAST_TYPE"), forecastHandler)
+	http.HandleFunc("/", healthCheck)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func decodeHourlyForecastRequest(_ context.Context, r *http.Request) (interface{}, error) {
-	var request hourlyForecastRequest
+func healthCheck(w http.ResponseWriter, req *http.Request) {
+	io.WriteString(w, "healthy!\n")
+}
+
+
+func decodeForecastRequest(_ context.Context, r *http.Request) (interface{}, error) {
+	var request forecastRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		return nil, err
 	}

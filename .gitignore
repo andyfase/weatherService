@@ -26,4 +26,7 @@ bin/*
 *.DS_Store
 
 src/github.com.*
+src/github.com
 src/gopkg.in.*
+src/golang.org
+src/gopkg.in

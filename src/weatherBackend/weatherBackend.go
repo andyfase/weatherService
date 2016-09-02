@@ -10,6 +10,7 @@ import (
   "net/http"
   "time"
   "strconv"
+	"errors"
 )
 
 
@@ -20,14 +21,15 @@ var processWait int
 type weatherRequest struct {
   Lat string `json:"lat"`
   Lon string `json:"lon"`
-  ForecastType []string `json:"summaries"`
+  ForecastType string `json:"forecastType"`
 }
 
 type weatherResponse struct {
   Lat string `json:"lat"`
   Lon string `json:"lon"`
   RequestID string `json:"requestID"`
-  Forecasts map[string]string `json:"forecasts"`
+  Forecast string `json:"forecast"`
+	ForecastType string `json:"forecastType"`
 }
 
 type QueueResponse struct {
@@ -46,28 +48,25 @@ func getJson(url string, target interface{}) error {
 	return json.NewDecoder(resp.Body).Decode(target)
 }
 
-func getWeather(lat string, lon string, summaries []string) (map[string]string, error) {
+func getWeather(lat string, lon string, forecastType string) (string, error) {
 	var data map[string]interface{}
-  response := make(map[string]string)
 	if err := getJson(weatherURL + lat + "," + lon, &data); err != nil {
-		return response, err
+		return "", err
 	}
-	for key := range summaries {
-		h, ok := data[summaries[key]].(map[string]interface{})
+
+	h, ok := data[forecastType].(map[string]interface{})
+	if ok {
+		forecast, ok := h["summary"].(string)
 		if ok {
-			forecast, ok := h["summary"].(string)
-			if ok {
-				response[summaries[key]] = forecast
-			}
+			return forecast, nil
 		}
 	}
-	return response, nil
+	return "", errors.New("Could not extract forecast for: " + forecastType)
 }
 
 func processMessage (message *sqs.Message, responseChannel chan QueueResponse) {
 
   var r weatherRequest
-  fmt.Println(*message.Body)
   if err := json.Unmarshal([]byte(*message.Body), &r); err != nil {
     fmt.Println(err)
     return
@@ -83,11 +82,12 @@ func processMessage (message *sqs.Message, responseChannel chan QueueResponse) {
   time.Sleep(time.Duration(processWait) * time.Millisecond)
 
   var response QueueResponse
-  response.message.Forecasts = forecast
+  response.message.Forecast = forecast
   response.message.RequestID = *message.MessageId
   response.ReceiptHandle = *message.ReceiptHandle
   response.message.Lat = r.Lat
   response.message.Lon = r.Lon
+	response.message.ForecastType = r.ForecastType
 
   responseChannel <- response
 }
